@@ -7,15 +7,14 @@ from datetime import datetime, timezone, timedelta
 from arch import arch_model
 
 # ---------------------------------------------------------
-# PAGE CONFIGURATION & TIMEZONE
+# PAGE CONFIGURATION & TIMEZONE (IST: UTC+05:30)
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Delta Exchange India - Advanced GARCH(1,1) Terminal",
+    page_title="Delta Exchange India - Institutional GARCH(1,1) Terminal",
     page_icon="⚡",
     layout="wide"
 )
 
-# Indian Standard Time (IST = UTC + 5:30)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # Custom Dark Terminal Theme CSS
@@ -33,8 +32,8 @@ st.markdown("""
     /* GARCH Level Cards Styling */
     .level-card {
         border-radius: 10px;
-        padding: 15px 22px;
-        margin-bottom: 11px;
+        padding: 16px 22px;
+        margin-bottom: 12px;
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -56,9 +55,9 @@ st.markdown("""
         border: 1px solid rgba(255, 167, 38, 0.28);
     }
     .level-base {
-        background: rgba(41, 182, 246, 0.14);
+        background: rgba(41, 182, 246, 0.13);
         border-left-color: #29b6f6;
-        border: 1px solid rgba(41, 182, 246, 0.40);
+        border: 1px solid rgba(41, 182, 246, 0.38);
     }
     .level-m1 {
         background: rgba(102, 187, 106, 0.09);
@@ -93,13 +92,22 @@ st.markdown("""
         text-align: right;
     }
 
-    /* Bracket order code box */
+    .stat-pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin-left: 6px;
+    }
+
     .bracket-box {
         background: rgba(255, 255, 255, 0.02);
         border: 1px solid rgba(255, 255, 255, 0.08);
         border-radius: 8px;
-        padding: 12px 16px;
+        padding: 14px 16px;
         margin-top: 8px;
+        line-height: 1.7;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -134,14 +142,14 @@ SUPPORTED_SYMBOLS = {
 BASE_URL = "https://api.india.delta.exchange"
 REQUEST_HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "delta-garch-quant-terminal/3.0"
+    "User-Agent": "delta-garch-quant-terminal/4.0"
 }
 
 # ---------------------------------------------------------
-# DATA FETCHERS & GARCH ENGINE
+# DATA FETCHERS & GARCH ESTIMATION ENGINE
 # ---------------------------------------------------------
 def fetch_live_ticker(sym: str):
-    """Fetches real-time market price from Delta Exchange India."""
+    """Fetches real-time price & 24h market statistics from Delta Exchange India."""
     url = f"{BASE_URL}/v2/tickers/{sym}"
     try:
         res = requests.get(url, headers=REQUEST_HEADERS, timeout=3)
@@ -160,10 +168,7 @@ def fetch_live_ticker(sym: str):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_historical_candles(sym: str, lookback_days: int = 365):
-    """
-    Fetches daily (1d) candles from Delta Exchange API using start/end epoch timestamps.
-    Cached for 15 minutes to preserve network bandwidth and rate limits.
-    """
+    """Fetches daily (1d) candles from Delta Exchange API with start/end epoch second bounds."""
     end_time = int(time.time())
     start_time = end_time - (lookback_days * 86400)
     
@@ -196,7 +201,6 @@ def fit_advanced_garch(close_series: pd.Series, dist_type: str = "StudentsT", is
     """
     Fits GARCH(1,1) or Asymmetric GJR-GARCH(1,1) model and outputs volatility diagnostics,
     unconditional variance, and shock half-life.
-    Cached to ensure per-second live ticker refreshes do NOT freeze the CPU.
     """
     returns = (100.0 * np.log(close_series / close_series.shift(1))).dropna()
     
@@ -204,7 +208,6 @@ def fit_advanced_garch(close_series: pd.Series, dist_type: str = "StudentsT", is
         raise ValueError("Insufficient candle history to fit GARCH.")
     
     try:
-        # If asymmetric is selected, o=1 enables GJR-GARCH leverage term
         o_param = 1 if is_asymmetric else 0
         model = arch_model(returns, vol="Garch", p=1, o=o_param, q=1, mean="Constant", dist=dist_type)
         res = model.fit(disp="off", show_warning=False)
@@ -217,13 +220,11 @@ def fit_advanced_garch(close_series: pd.Series, dist_type: str = "StudentsT", is
         gamma = float(res.params.get("gamma[1]", 0.0)) if is_asymmetric else 0.0
         beta = float(res.params.get("beta[1]", 0.0))
         
-        # Effective persistence
         persistence = alpha + beta + (0.5 * gamma if is_asymmetric else 0.0)
         
-        # Long-run unconditional annual volatility
-        if 0 < persistence < 1.0 and omega > 0:
+        if 0.0 < persistence < 0.9999 and omega > 0:
             uncond_var = (omega / (1.0 - persistence)) / 10000.0
-            uncond_ann_vol = np.sqrt(uncond_var) * np.sqrt(365.0)
+            uncond_ann_vol = np.sqrt(max(0.0, uncond_var)) * np.sqrt(365.0)
             half_life = np.log(0.5) / np.log(persistence)
         else:
             uncond_ann_vol = daily_sigma * np.sqrt(365.0)
@@ -243,7 +244,6 @@ def fit_advanced_garch(close_series: pd.Series, dist_type: str = "StudentsT", is
         return daily_sigma, diagnostics
         
     except Exception as e:
-        # Robust Fallback: RiskMetrics EWMA (lambda=0.94)
         lam = 0.94
         sq_ret = (returns / 100.0) ** 2
         ewma_var = sq_ret.ewm(alpha=(1 - lam)).mean().iloc[-1]
@@ -262,7 +262,7 @@ def fit_advanced_garch(close_series: pd.Series, dist_type: str = "StudentsT", is
         return daily_sigma, diagnostics
 
 # ---------------------------------------------------------
-# SIDEBAR CONTROLS & COMPREHENSIVE HELP TOOLTIPS
+# SIDEBAR CONTROLS & SYNCHRONIZED PLACEHOLDER
 # ---------------------------------------------------------
 st.sidebar.title("⚡ Quant Terminal Controls")
 
@@ -273,17 +273,17 @@ symbol = st.sidebar.selectbox(
     index=0,
     format_func=lambda s: f"{s} - {SUPPORTED_SYMBOLS[s]['name']}",
     help=(
-        "Select the asset on Delta Exchange India:\n\n"
-        "• XAUTUSD: Tether Gold Perpetual (1 contract = 0.001 oz Gold, USD quote).\n"
-        "• BTCUSD: Bitcoin Perpetual (1 contract = 0.001 BTC).\n"
-        "• ETHUSD: Ethereum Perpetual (1 contract = 0.01 ETH)."
+        "Select derivative contract on Delta Exchange India:\n\n"
+        "• XAUTUSD: Tether Gold Perpetual (Gold/USD, prioritized).\n"
+        "• BTCUSD: Bitcoin Perpetual.\n"
+        "• ETHUSD: Ethereum Perpetual."
     )
 )
 
 auto_refresh = st.sidebar.toggle(
     "⚡ Live Real-Time Auto-Refresh",
     value=True,
-    help="Continuously polls Delta Exchange India for live ticker quotes without re-estimating GARCH."
+    help="When enabled, streams live market prices from Delta Exchange India continuously."
 )
 
 refresh_rate_sec = st.sidebar.select_slider(
@@ -291,52 +291,55 @@ refresh_rate_sec = st.sidebar.select_slider(
     options=[1, 2, 3, 5, 10],
     value=2,
     disabled=not auto_refresh,
-    help="Polling interval in seconds. 2s offers live tracking without triggering Delta Exchange rate limits."
+    help="Polling frequency in seconds. 2s offers low latency without breaching rate limits."
 )
 
+st.sidebar.markdown("---")
+
+# MOUNT DYNAMIC SIDEBAR PLACEHOLDER (Synchronized with Top-Right Price)
+sidebar_price_slot = st.sidebar.empty()
+
 # ---------------------------------------------------------
-# ROBUST MANUAL PRICE OVERRIDE ENGINE (FIX FOR ETH / ALL)
+# ROBUST MANUAL PRICE OVERRIDE (RESOLVES ETH/BTC/XAU BUGS)
 # ---------------------------------------------------------
 use_manual_override = st.sidebar.checkbox(
     "Manual Price Override",
     value=False,
-    key=f"override_toggle_{symbol}",
-    help="Anchor volatility channels around a custom price (e.g. key breakout level or custom entry) rather than the live market price."
+    key=f"override_flag_{symbol}",
+    help="Override live exchange price with a custom level to project volatility cones."
 )
 
 # Fetch latest price
 live_px, live_meta = fetch_live_ticker(symbol)
 market_price_anchor = live_px if (live_px and live_px > 0) else SUPPORTED_SYMBOLS[symbol]["default_price"]
 
-# Isolated session key per symbol avoids cross-asset state corruption
-session_px_key = f"active_manual_px_{symbol}"
-if session_px_key not in st.session_state:
-    st.session_state[session_px_key] = float(market_price_anchor)
+# Session key bound to this asset
+manual_input_key = f"manual_num_val_{symbol}"
+if manual_input_key not in st.session_state:
+    st.session_state[manual_input_key] = float(market_price_anchor)
 
 if use_manual_override:
     col_input, col_reset = st.sidebar.columns([3, 1])
     with col_reset:
         st.write("")
         st.write("")
-        if st.button("↺ Sync", help="Reset manual price to live market mark"):
-            st.session_state[session_px_key] = float(market_price_anchor)
+        # Reset button updates session state directly and triggers rerun
+        if st.button("↺ Reset", key=f"btn_reset_{symbol}", help="Reset manual price box back to live market price"):
+            st.session_state[manual_input_key] = float(market_price_anchor)
             st.rerun()
-            
+
     with col_input:
         base_price = st.number_input(
             "Enter Base Price ($)",
             min_value=0.01,
             max_value=10_000_000.0,
-            value=float(st.session_state[session_px_key]),
             step=SUPPORTED_SYMBOLS[symbol]["step"],
             format="%.2f",
-            key=f"widget_num_px_{symbol}",
+            key=manual_input_key,
             help=f"Custom anchor price for {symbol}. Step size: ${SUPPORTED_SYMBOLS[symbol]['step']:.2f}."
         )
-        st.session_state[session_px_key] = base_price
 else:
     base_price = float(market_price_anchor)
-    st.sidebar.markdown(f"**Live Exchange Price:** `${base_price:,.2f}`")
 
 lookback_days = st.sidebar.slider(
     "Model Calibration Window (Days)",
@@ -344,11 +347,7 @@ lookback_days = st.sidebar.slider(
     max_value=730,
     value=365,
     step=30,
-    help=(
-        "Number of historical daily candles used to estimate GARCH parameters:\n\n"
-        "• 365 Days: Optimal for capturing standard annual volatility regimes.\n"
-        "• 90-180 Days: High responsiveness to recent volatility expansions or contractions."
-    )
+    help="Historical daily candles for GARCH parameter estimation (365d recommended for full market regime cycle)."
 )
 
 st.sidebar.markdown("---")
@@ -358,10 +357,7 @@ model_type = st.sidebar.selectbox(
     "GARCH Model Type",
     options=["Standard GARCH(1,1)", "Asymmetric GJR-GARCH(1,1)"],
     index=1 if symbol != "XAUTUSD" else 0,
-    help=(
-        "• Standard GARCH(1,1): Symmetric reaction to both positive and negative returns.\n\n"
-        "• Asymmetric GJR-GARCH: Models the 'leverage effect' where down moves trigger higher volatility spikes than up moves."
-    )
+    help="GJR-GARCH captures the leverage effect (down days trigger higher volatility than up days)."
 )
 is_asymmetric = "GJR" in model_type
 
@@ -369,47 +365,39 @@ dist_choice = st.sidebar.selectbox(
     "Error Distribution",
     options=["StudentsT", "Normal"],
     index=0,
-    help=(
-        "Statistical innovation density:\n\n"
-        "• StudentsT (Recommended): Captures heavy fat tails and jump kurtosis common in Gold and Crypto.\n\n"
-        "• Normal: Standard Gaussian curve without tail clustering."
-    )
+    help="StudentsT accounts for fat-tailed jump risk common in crypto and metals."
 )
 
 calc_method = st.sidebar.radio(
     "Level Formula",
     options=["Geometric (Log-Normal: P * e^±kσ)", "Linear Approximation: P * (1 ± kσ)"],
     index=0,
-    help=(
-        "• Geometric (Recommended): Standard in institutional options pricing (Black-Scholes). "
-        "Multiplies price by e^(±kσ). Compounding prevents negative prices and respects log-normal asset distributions.\n\n"
-        "• Linear: Simple arithmetic shift P * (1 ± kσ). Useful for quick back-of-the-envelope calculations."
-    )
+    help="Geometric compounding (Black-Scholes standard) preserves positive non-zero boundaries."
 )
 
 if st.sidebar.button("🔄 Force Re-fit GARCH Model", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
-# Comprehensive Math Expander in Sidebar
+# Mathematical Guide Expander in Sidebar
 with st.sidebar.expander("ℹ️ Mathematical & Parameter Guide"):
     st.markdown("""
-    **GJR-GARCH Equation:**
+    **GJR-GARCH Volatility Formula:**
     $$\\sigma_t^2 = \\omega + (\\alpha + \\gamma I_{t-1}) \\epsilon_{t-1}^2 + \\beta \\sigma_{t-1}^2$$
     
-    * **$\\omega$ (Baseline Variance):** Long-run minimum variance constant.
-    * **$\\alpha$ (Shock Sensitivity):** Reaction to yesterday's unexpected news/price shock.
-    * **$\\gamma$ (Asymmetry / Leverage):** Additional volatility penalty applied when yesterday was a down day ($I_{t-1} = 1$).
-    * **$\\beta$ (Persistence):** Memory of past volatility.
-    * **Half-Life:** Trading days required for a volatility spike to decay by 50% back to baseline.
+    * **$\\omega$:** Baseline long-run variance.
+    * **$\\alpha$:** Immediate reaction to news shocks.
+    * **$\\gamma$:** Downside shock leverage factor ($I_{t-1}=1$ on down days).
+    * **$\\beta$:** Volatility clustering persistence.
+    * **Half-Life:** Days for a volatility spike to decay by 50% back to baseline.
     
-    **Normal Distribution Probability:**
-    * $\\pm 1\\sigma$: ~68.27% of price distribution is contained within this band.
-    * $\\pm 2\\sigma$: ~95.45% of price distribution is contained within this band.
+    **Normal Distribution Probability Bounds:**
+    * **$\\pm 1\\sigma$:** 68.27% of return outcomes.
+    * **$\\pm 2\\sigma$:** 95.45% of return outcomes.
     """)
 
 # ---------------------------------------------------------
-# HISTORICAL DATA & GARCH ESTIMATION
+# HISTORICAL DATA & GARCH FIT
 # ---------------------------------------------------------
 df_candles = fetch_historical_candles(symbol, lookback_days=lookback_days)
 
@@ -430,7 +418,7 @@ daily_sigma, garch_diag = fit_advanced_garch(
 )
 annual_sigma = daily_sigma * np.sqrt(365.0)
 
-# Multi-Horizon Volatility Scaling (Square-Root of Time Rule)
+# Multi-Horizon Scaling (Square-Root of Time Rule)
 horizons = {
     "1-Day (Intraday)": daily_sigma * np.sqrt(1),
     "3-Day (Swing)": daily_sigma * np.sqrt(3),
@@ -441,9 +429,27 @@ horizons = {
 # ---------------------------------------------------------
 # CLEAN CARDS DASHBOARD
 # ---------------------------------------------------------
-def render_clean_dashboard(current_price: float):
-    """Renders clean, chart-free, institutional cards with IST time synchronization."""
+def render_clean_dashboard(current_price: float, live_market_price: float):
+    """Renders clean, chart-free, institutional cards with synchronized IST time."""
     
+    # Update sidebar price indicator synchronously
+    if use_manual_override:
+        sidebar_price_slot.markdown(f"""
+        <div style="background:rgba(41,182,246,0.12); border:1px solid rgba(41,182,246,0.35); padding:10px 14px; border-radius:8px; margin-bottom:12px;">
+            <div style="font-size:0.75rem; color:#29b6f6; font-weight:700;">MANUAL OVERRIDE ACTIVE</div>
+            <div style="font-size:1.25rem; font-weight:800; font-family:monospace; color:#29b6f6;">${current_price:,.2f}</div>
+            <div style="font-size:0.75rem; opacity:0.7; margin-top:3px;">Live Exchange Mark: ${live_market_price:,.2f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        sidebar_price_slot.markdown(f"""
+        <div style="background:rgba(0,230,118,0.08); border:1px solid rgba(0,230,118,0.25); padding:10px 14px; border-radius:8px; margin-bottom:12px;">
+            <div style="font-size:0.75rem; color:#00e676; font-weight:700;">LIVE EXCHANGE PRICE (IST)</div>
+            <div style="font-size:1.25rem; font-weight:800; font-family:monospace; color:#00e676;">${current_price:,.2f}</div>
+            <div style="font-size:0.75rem; opacity:0.7; margin-top:3px;">Delta Exchange India Feed</div>
+        </div>
+        """, unsafe_allow_html=True)
+
     # 1. Level Projections
     is_geom = "Geometric" in calc_method
     if is_geom:
@@ -467,7 +473,7 @@ def render_clean_dashboard(current_price: float):
     p_minus_1s_rnd = round(p_minus_1s / tick) * tick
     p_minus_2s_rnd = round(p_minus_2s / tick) * tick
 
-    # VaR 95% and 99%
+    # VaR & Tail Quantiles
     var_95_pct = 1.645 * daily_sigma
     var_99_pct = 2.326 * daily_sigma
     var_95_usd = current_price * var_95_pct
@@ -484,7 +490,7 @@ def render_clean_dashboard(current_price: float):
     else:
         regime_badge = "🔴 Extreme Vol (High Tail Risk)"
 
-    # IST Time formatting
+    # Accurate IST Time
     ist_now = datetime.now(IST)
     ist_time_str = ist_now.strftime("%H:%M:%S IST")
 
@@ -509,9 +515,27 @@ def render_clean_dashboard(current_price: float):
             delta_color="off"
         )
 
+    # Live 24h Delta Exchange Market Stats Strip
+    if live_meta:
+        s1, s2, s3, s4, s5 = st.columns(5)
+        with s1:
+            ltp_chg = float(live_meta.get("ltp_change_24h", 0.0)) * 100
+            st.metric("24h Price Change", f"{ltp_chg:+.2f}%", delta=f"{ltp_chg:+.2f}%")
+        with s2:
+            st.metric("24h High", f"${float(live_meta.get('high', 0.0)):,.2f}")
+        with s3:
+            st.metric("24h Low", f"${float(live_meta.get('low', 0.0)):,.2f}")
+        with s4:
+            st.metric("24h Volume (Turnover)", f"${float(live_meta.get('turnover_usd', 0.0)):,.0f}")
+        with s5:
+            mark_p = float(live_meta.get("mark_price", 0.0))
+            spot_p = float(live_meta.get("spot_price", 0.0))
+            basis = mark_p - spot_p
+            st.metric("Mark-Spot Basis", f"${basis:+.2f}", delta=f"{basis:+.2f}")
+
     st.markdown("---")
 
-    # 2. Risk Metrics & Volatility Thermometer
+    # Risk Metrics & Volatility Thermometer Row
     m1, m2, m3, m4 = st.columns(4)
     with m1:
         st.metric(
@@ -519,7 +543,7 @@ def render_clean_dashboard(current_price: float):
             f"{daily_sigma * 100:.3f}%",
             delta=f"Annualized: {annual_sigma * 100:.2f}%",
             delta_color="off",
-            help="Forecast 1-day standard deviation from GARCH model."
+            help="1-Day standard deviation forecast from the fitted GARCH model."
         )
     with m2:
         st.metric(
@@ -527,7 +551,7 @@ def render_clean_dashboard(current_price: float):
             f"${var_95_usd:,.2f}",
             delta=f"-{var_95_pct * 100:.2f}% Max 1D Loss",
             delta_color="inverse",
-            help="Value at Risk: 95% of trading days will experience losses less than this amount."
+            help="Value at Risk: 95% of trading days experience losses within this limit."
         )
     with m3:
         st.metric(
@@ -535,7 +559,7 @@ def render_clean_dashboard(current_price: float):
             f"-{var_99_pct * 100:.2f}%",
             delta=f"-${(current_price * var_99_pct):,.2f}",
             delta_color="inverse",
-            help="Stress-test extreme quantile (2.33σ)."
+            help="Extreme 99% loss quantile (2.33σ)."
         )
     with m4:
         st.metric(
@@ -543,20 +567,24 @@ def render_clean_dashboard(current_price: float):
             regime_badge.split(" ")[1],
             delta=regime_badge.split(" ")[0] + " " + " ".join(regime_badge.split(" ")[2:]),
             delta_color="off",
-            help="Current forecast annual volatility vs historical long-run baseline."
+            help="Current forecast annualized volatility vs long-run historical baseline."
         )
 
     st.markdown("---")
 
-    # 3. GARCH Level Cards
+    # GARCH Level Cards
     st.markdown("### 🎯 GARCH Volatility Level Cards")
 
     # +2 Sigma Card
     st.markdown(f"""
     <div class="level-card level-p2">
         <div>
-            <div class="level-name" style="color: #ef5350;">🔴 +2 Sigma (+2σ) Resistance</div>
-            <div class="level-desc">95.4% Statistical Envelope • Extreme Overbought • Optimal for Selling OTM Calls / Bear Call Spreads</div>
+            <div class="level-name" style="color: #ef5350;">
+                🔴 +2 Sigma (+2σ) Resistance 
+                <span class="stat-pill" style="background: rgba(239,83,80,0.2); color: #ef5350;">95.45% Bound</span>
+                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ddd;">Touch Prob: ~4.6%</span>
+            </div>
+            <div class="level-desc">Extreme Overbought • Call Spread Short Leg / Bearish Exhaustion Reversal</div>
         </div>
         <div>
             <div class="level-price" style="color: #ef5350;">${p_plus_2s_rnd:,.2f}</div>
@@ -569,8 +597,12 @@ def render_clean_dashboard(current_price: float):
     st.markdown(f"""
     <div class="level-card level-p1">
         <div>
-            <div class="level-name" style="color: #ffa726;">🟠 +1 Sigma (+1σ) Resistance</div>
-            <div class="level-desc">68.3% Statistical Envelope • Momentum Exhaustion Barrier • Take-Profit Zone for Longs</div>
+            <div class="level-name" style="color: #ffa726;">
+                🟠 +1 Sigma (+1σ) Resistance 
+                <span class="stat-pill" style="background: rgba(255,167,38,0.2); color: #ffa726;">68.27% Bound</span>
+                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ddd;">Touch Prob: ~31.7%</span>
+            </div>
+            <div class="level-desc">Momentum Barrier • First Resistance Zone • Take-Profit Target for Longs</div>
         </div>
         <div>
             <div class="level-price" style="color: #ffa726;">${p_plus_1s_rnd:,.2f}</div>
@@ -583,12 +615,15 @@ def render_clean_dashboard(current_price: float):
     st.markdown(f"""
     <div class="level-card level-base">
         <div>
-            <div class="level-name" style="color: #29b6f6;">🔵 🎯 Base Anchor Reference (Current Mark)</div>
-            <div class="level-desc">Market Equilibrium Point • Delta Exchange Live Execution Anchor</div>
+            <div class="level-name" style="color: #29b6f6;">
+                🔵 🎯 Base Anchor Reference 
+                <span class="stat-pill" style="background: rgba(41,182,246,0.25); color: #29b6f6;">{"Manual Override" if use_manual_override else "Live Mark"}</span>
+            </div>
+            <div class="level-desc">Market Equilibrium Point • Baseline Delta Execution Anchor</div>
         </div>
         <div>
             <div class="level-price" style="color: #29b6f6;">${current_price:,.2f}</div>
-            <div class="level-spread" style="color: #29b6f6;">0.00% Center Point</div>
+            <div class="level-spread" style="color: #29b6f6;">0.00% Baseline</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -597,8 +632,12 @@ def render_clean_dashboard(current_price: float):
     st.markdown(f"""
     <div class="level-card level-m1">
         <div>
-            <div class="level-name" style="color: #66bb6a;">🟢 -1 Sigma (-1σ) Support</div>
-            <div class="level-desc">68.3% Statistical Envelope • Trend Pullback Support • Dip Buying Accumulation Zone</div>
+            <div class="level-name" style="color: #66bb6a;">
+                🟢 -1 Sigma (-1σ) Support 
+                <span class="stat-pill" style="background: rgba(102,187,106,0.2); color: #66bb6a;">68.27% Bound</span>
+                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ddd;">Touch Prob: ~31.7%</span>
+            </div>
+            <div class="level-desc">Pullback Support • First Dip Buying Accumulation Zone for Trends</div>
         </div>
         <div>
             <div class="level-price" style="color: #66bb6a;">${p_minus_1s_rnd:,.2f}</div>
@@ -611,8 +650,12 @@ def render_clean_dashboard(current_price: float):
     st.markdown(f"""
     <div class="level-card level-m2">
         <div>
-            <div class="level-name" style="color: #26a69a;">🟢 -2 Sigma (-2σ) Support</div>
-            <div class="level-desc">95.4% Statistical Envelope • Extreme Oversold • High Probability Reversal Long / Bull Put Spreads</div>
+            <div class="level-name" style="color: #26a69a;">
+                🟢 -2 Sigma (-2σ) Support 
+                <span class="stat-pill" style="background: rgba(38,166,154,0.2); color: #26a69a;">95.45% Bound</span>
+                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ddd;">Touch Prob: ~4.6%</span>
+            </div>
+            <div class="level-desc">Extreme Oversold • Put Spread Short Leg / High Probability Mean-Reversion Long</div>
         </div>
         <div>
             <div class="level-price" style="color: #26a69a;">${p_minus_2s_rnd:,.2f}</div>
@@ -623,8 +666,8 @@ def render_clean_dashboard(current_price: float):
 
     st.markdown("---")
 
-    # 4. Multi-Horizon Expected Moves Row
-    st.markdown("### ⏳ Multi-Horizon Volatility Term Structure ($\sigma \cdot \sqrt{T}$)")
+    # Multi-Horizon Expected Moves Row
+    st.markdown("### ⏳ Multi-Horizon Volatility Envelopes ($\sigma \cdot \sqrt{T}$)")
     
     h_cols = st.columns(4)
     for idx, (h_name, h_sig) in enumerate(horizons.items()):
@@ -646,7 +689,7 @@ def render_clean_dashboard(current_price: float):
 
     st.markdown("---")
 
-    # 5. Delta Exchange Order Bracket Generator
+    # Delta Exchange Bracket Order Generator
     st.markdown("### 🛡️ Delta Exchange Order Bracket Generator")
     st.caption("Quantitative parameters matching Delta Exchange India Bracket Order API structure.")
     
@@ -689,7 +732,7 @@ def render_clean_dashboard(current_price: float):
 
     st.markdown("---")
 
-    # 6. Quantitative Execution Matrix Table
+    # Quantitative Execution Matrix Table
     st.markdown("### 📋 Delta Exchange Execution Matrix & Options Calibration")
     
     matrix_df = pd.DataFrame({
@@ -708,12 +751,19 @@ def render_clean_dashboard(current_price: float):
             f"{((p_minus_1s/current_price)-1)*100:.2f}%",
             f"{((p_minus_2s/current_price)-1)*100:.2f}%"
         ],
-        "Normal Distribution Prob": [
-            "~2.3% Tail Prob (Overbought)",
-            "~15.9% Upper Boundary",
-            "50.0% Median Fair Value",
-            "~15.9% Lower Boundary",
-            "~2.3% Tail Prob (Oversold)"
+        "Terminal Expiry Prob": [
+            "~2.28% Above",
+            "~15.87% Above",
+            "50.00% Baseline",
+            "~15.87% Below",
+            "~2.28% Below"
+        ],
+        "Intraday Touch Prob": [
+            "~4.55% Touch",
+            "~31.73% Touch",
+            "100.00% Active",
+            "~31.73% Touch",
+            "~4.55% Touch"
         ],
         "Delta Options Calibration": [
             "Delta ~0.05 (Sell OTM Call / Credit Spread)",
@@ -732,33 +782,26 @@ def render_clean_dashboard(current_price: float):
     })
     st.dataframe(matrix_df, use_container_width=True, hide_index=True)
 
-
 # ---------------------------------------------------------
 # AUTO-REFRESH EXECUTION CONTROLLER
 # ---------------------------------------------------------
 if auto_refresh and hasattr(st, "fragment"):
     @st.fragment(run_every=f"{refresh_rate_sec}s")
     def live_auto_refresh_view():
-        if use_manual_override:
-            curr_px = float(st.session_state[session_px_key])
-        else:
-            fresh_px, _ = fetch_live_ticker(symbol)
-            curr_px = fresh_px if (fresh_px and fresh_px > 0) else base_price
-        render_clean_dashboard(curr_px)
+        fresh_px, _ = fetch_live_ticker(symbol)
+        live_mkt = fresh_px if (fresh_px and fresh_px > 0) else base_price
+        curr_px = float(st.session_state[manual_input_key]) if use_manual_override else live_mkt
+        render_clean_dashboard(curr_px, live_mkt)
         
     live_auto_refresh_view()
 
 elif auto_refresh:
-    # Fallback for older Streamlit environments
-    if use_manual_override:
-        curr_px = float(st.session_state[session_px_key])
-    else:
-        fresh_px, _ = fetch_live_ticker(symbol)
-        curr_px = fresh_px if (fresh_px and fresh_px > 0) else base_price
-    render_clean_dashboard(curr_px)
+    fresh_px, _ = fetch_live_ticker(symbol)
+    live_mkt = fresh_px if (fresh_px and fresh_px > 0) else base_price
+    curr_px = float(st.session_state[manual_input_key]) if use_manual_override else live_mkt
+    render_clean_dashboard(curr_px, live_mkt)
     time.sleep(refresh_rate_sec)
     st.rerun()
 
 else:
-    # Manual static view
-    render_clean_dashboard(base_price)
+    render_clean_dashboard(base_price, market_price_anchor)
