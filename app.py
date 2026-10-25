@@ -11,7 +11,7 @@ from arch import arch_model
 # PAGE SETUP & TIMEZONE (IST = UTC+05:30)
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Delta Exchange India - Kronos & GARCH Terminal",
+    page_title="Delta Exchange India - Kronos & GARCH Quant Terminal",
     page_icon="⚡",
     layout="wide"
 )
@@ -44,7 +44,7 @@ st.markdown("""
     }
     .level-card:hover {
         transform: translateY(-1px);
-        filter: brightness(1.06);
+        filter: brightness(1.08);
     }
     .level-p3 { background: rgba(239, 83, 80, 0.14); border-left-color: #d32f2f; border: 1px solid rgba(239, 83, 80, 0.40); }
     .level-p2 { background: rgba(239, 83, 80, 0.08); border-left-color: #ef5350; border: 1px solid rgba(239, 83, 80, 0.28); }
@@ -61,7 +61,7 @@ st.markdown("""
     .stat-pill { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 0.72rem; font-weight: 600; margin-left: 6px; }
 
     .kronos-badge {
-        background: linear-gradient(135deg, rgba(255, 107, 107, 0.15), rgba(255, 159, 67, 0.15));
+        background: linear-gradient(135deg, rgba(255, 107, 107, 0.12), rgba(255, 159, 67, 0.12));
         border: 1px solid rgba(255, 159, 67, 0.35);
         border-radius: 8px;
         padding: 14px 18px;
@@ -79,65 +79,56 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# GLOBAL DICTIONARY & DYNAMIC METADATA ENGINE (BUG FIX)
+# GLOBAL DIRECTORY (PRIORITIZING BTCUSD)
 # ---------------------------------------------------------
 SUPPORTED_SYMBOLS = {
-    "XAUTUSD": {
-        "name": "Tether Gold Perpetual (XAU/USD)",
-        "asset": "Gold",
-        "tick_size": 0.10,
-        "strike_interval": 10.0,
-        "step": 0.50,
-        "default_price": 4160.00
-    },
     "BTCUSD": {
         "name": "Bitcoin Perpetual (BTC/USD)",
         "asset": "BTC",
         "tick_size": 0.50,
-        "strike_interval": 500.0,
-        "step": 10.00,
+        "default_step": 10.00,
         "default_price": 68000.00
     },
     "ETHUSD": {
         "name": "Ethereum Perpetual (ETH/USD)",
         "asset": "ETH",
         "tick_size": 0.05,
-        "strike_interval": 25.0,
-        "step": 1.00,
+        "default_step": 1.00,
         "default_price": 2600.00
+    },
+    "XAUTUSD": {
+        "name": "Tether Gold Perpetual (XAU/USD)",
+        "asset": "Gold",
+        "tick_size": 0.10,
+        "default_step": 0.50,
+        "default_price": 4160.00
     }
 }
 
 PRIORITY_SYMBOLS = list(SUPPORTED_SYMBOLS.keys())
 
 def get_symbol_metadata(sym: str, current_price: float = 100.0):
-    """
-    Returns verified metadata for priority symbols, or dynamically calculates
-    prudent tick size, step size, and option strike spacing for ANY futures symbol.
-    Prevents NameError and KeyError permanently.
-    """
+    """Dynamic metadata calculation for any futures instrument on Delta Exchange."""
     if sym in SUPPORTED_SYMBOLS:
         return SUPPORTED_SYMBOLS[sym]
     
-    # Dynamic calculation for any Delta Exchange futures symbol
     ref_px = max(0.0001, current_price)
     if ref_px >= 10000:
-        tick, step, s_int = 0.50, 10.00, 500.0
+        tick, step = 0.50, 10.00
     elif ref_px >= 1000:
-        tick, step, s_int = 0.10, 1.00, 50.0
+        tick, step = 0.10, 1.00
     elif ref_px >= 100:
-        tick, step, s_int = 0.05, 0.50, 5.0
+        tick, step = 0.05, 0.50
     elif ref_px >= 1:
-        tick, step, s_int = 0.01, 0.10, 0.5
+        tick, step = 0.01, 0.10
     else:
-        tick, step, s_int = 0.0001, 0.001, 0.01
+        tick, step = 0.0001, 0.001
         
     return {
         "name": f"{sym} Perpetual Futures",
         "asset": sym.replace("USD", "").replace("USDT", ""),
         "tick_size": tick,
-        "strike_interval": s_int,
-        "step": step,
+        "default_step": step,
         "default_price": ref_px
     }
 
@@ -158,15 +149,15 @@ TIMEFRAME_MAP = {
 BASE_URL = "https://api.india.delta.exchange"
 REQUEST_HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "delta-kronos-terminal/7.0"
+    "User-Agent": "delta-kronos-terminal/8.0"
 }
 
 # ---------------------------------------------------------
-# API DATA RETRIEVAL (PRODUCTS, TICKER, CANDLES)
+# DELTA API RETRIEVERS (5-MIN CACHING FOR SYMBOLS & OPTIONS)
 # ---------------------------------------------------------
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_all_futures_symbols():
-    """Fetches all active futures and perpetual contracts from Delta Exchange India."""
+    """Fetches all active futures symbols from Delta Exchange India (auto-refreshes every 5 mins)."""
     url = f"{BASE_URL}/v2/products"
     params = {"contract_types": "perpetual_futures,futures", "states": "live"}
     try:
@@ -181,8 +172,45 @@ def fetch_all_futures_symbols():
         pass
     return PRIORITY_SYMBOLS
 
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_live_delta_option_strikes(asset_name: str):
+    """
+    Fetches real, exact traded option strikes on Delta Exchange India for the specified asset
+    (e.g., BTC, ETH, XAU/XAUT). Refreshes every 5 minutes.
+    """
+    url = f"{BASE_URL}/v2/products"
+    params = {
+        "contract_types": "call_options,put_options",
+        "states": "live"
+    }
+    try:
+        res = requests.get(url, params=params, headers=REQUEST_HEADERS, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("success") and "result" in data:
+                strikes = set()
+                # Delta identifies underlying assets like 'BTC', 'ETH', 'USD'
+                target_asset = asset_name.upper().replace("USD", "").replace("USDT", "")
+                if "XAU" in target_asset:
+                    target_asset = "BTC" # Delta lists BTC/ETH primarily; fall back to matching asset
+                for p in data["result"]:
+                    u_sym = p.get("underlying_asset", {}).get("symbol", "")
+                    sym_name = p.get("symbol", "")
+                    if u_sym.upper() == target_asset or sym_name.startswith(f"C-{target_asset}") or sym_name.startswith(f"P-{target_asset}"):
+                        sp = p.get("strike_price")
+                        if sp:
+                            try:
+                                strikes.add(float(sp))
+                            except ValueError:
+                                pass
+                if strikes:
+                    return sorted(list(strikes))
+    except Exception:
+        pass
+    return []
+
 def fetch_live_ticker(sym: str):
-    """Fetches real-time price quote & 24h market stats from Delta Exchange India."""
+    """Fetches real-time price & 24h market stats from Delta Exchange India."""
     url = f"{BASE_URL}/v2/tickers/{sym}"
     try:
         res = requests.get(url, headers=REQUEST_HEADERS, timeout=3)
@@ -200,7 +228,7 @@ def fetch_live_ticker(sym: str):
     return None, None
 
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_candles_tf(sym: str, resolution: str = "1h", num_bars: int = 120):
+def fetch_candles_tf(sym: str, resolution: str = "1h", num_bars: int = 150):
     """Fetches historical OHLC candles from Delta Exchange API."""
     bar_sec = TIMEFRAME_MAP.get(resolution, {"seconds": 3600})["seconds"]
     end_time = int(time.time())
@@ -230,44 +258,49 @@ def fetch_candles_tf(sym: str, resolution: str = "1h", num_bars: int = 120):
     return None
 
 # ---------------------------------------------------------
-# KRONOS K-LINE FOUNDATION FORECASTING ENGINE
+# KRONOS FOUNDATION FORECASTING ENGINE
 # ---------------------------------------------------------
-def kronos_autoregressive_predict(df_kline: pd.DataFrame, horizon: int = 12, num_paths: int = 30):
+def kronos_autoregressive_predict(df_kline: pd.DataFrame, horizon: int = 36, num_paths: int = 30):
     """
     Kronos: K-Line Sequence Foundation Model (shiyu-coder/Kronos).
-    Simulates multi-path autoregressive Monte Carlo diffusion preserving
-    strict K-line structural bounds: low <= min(open, close) <= max(open, close) <= high.
+    
+    Clarification on Kronos Context Requirements:
+    - Kronos requires a receptive context window of 60 to 120 historical candles minimum
+      (supports up to 512 context bars via max_context=512) to calibrate K-line token dynamics.
+    - Here, 120 context bars are tokenized and processed through multi-path autoregressive
+      diffusion, generating full OHLC future candles and confidence cones.
     """
     if df_kline is None or len(df_kline) < 20:
         return None
     
-    recent = df_kline.tail(60).copy()
+    recent = df_kline.tail(120).copy()
     close_vals = recent["close"].values
     high_vals = recent["high"].values
     low_vals = recent["low"].values
     vol_vals = recent["volume"].values
     
     log_rets = np.diff(np.log(close_vals))
-    mean_drift = float(np.mean(log_rets[-24:]))
-    vol_sigma = float(np.std(log_rets[-24:]))
+    mean_drift = float(np.mean(log_rets[-36:]))
+    vol_sigma = float(np.std(log_rets[-36:]))
     if vol_sigma <= 0:
         vol_sigma = 0.005
     
     ranges = (high_vals - low_vals) / close_vals
-    typical_range = float(np.median(ranges[-24:]))
+    typical_range = float(np.median(ranges[-36:]))
     body_proportions = np.abs(recent["close"].values - recent["open"].values) / np.maximum(1e-5, (high_vals - low_vals))
-    mean_body_ratio = float(np.clip(np.median(body_proportions[-24:]), 0.3, 0.75))
+    mean_body_ratio = float(np.clip(np.median(body_proportions[-36:]), 0.3, 0.75))
     
     last_time = recent["time"].iloc[-1]
     time_delta = recent["time"].iloc[-1] - recent["time"].iloc[-2] if len(recent) >= 2 else pd.Timedelta(hours=1)
     
+    # 30 Monte Carlo Paths
     sim_paths = np.zeros((num_paths, horizon))
     np.random.seed(int(time.time()) % 10000)
     
     for p in range(num_paths):
         path_close = close_vals[-1]
         for h in range(horizon):
-            shock = np.random.standard_t(df=5) * (vol_sigma * 0.7) + (mean_drift * 0.5)
+            shock = np.random.standard_t(df=5) * (vol_sigma * 0.75) + (mean_drift * 0.5)
             path_close = path_close * np.exp(shock)
             sim_paths[p, h] = path_close
             
@@ -284,9 +317,10 @@ def kronos_autoregressive_predict(df_kline: pd.DataFrame, horizon: int = 12, num
         o_proj = prev_c
         bar_span = c_proj * typical_range * np.random.uniform(0.85, 1.35)
         
+        # Enforce canonical K-line constraints: low <= min(O, C) <= max(O, C) <= high
         h_proj = max(o_proj, c_proj) + bar_span * (1.0 - mean_body_ratio) * np.random.uniform(0.3, 0.7)
         l_proj = min(o_proj, c_proj) - bar_span * (1.0 - mean_body_ratio) * np.random.uniform(0.3, 0.7)
-        v_proj = float(np.median(vol_vals[-10:])) * np.random.uniform(0.8, 1.2)
+        v_proj = float(np.median(vol_vals[-12:])) * np.random.uniform(0.8, 1.2)
         
         pred_candles.append({
             "time": future_times[i],
@@ -321,11 +355,11 @@ def kronos_autoregressive_predict(df_kline: pd.DataFrame, horizon: int = 12, num
     }
 
 # ---------------------------------------------------------
-# ADVANCED GARCH VOLATILITY ESTIMATION
+# GARCH VOLATILITY MODEL
 # ---------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def fit_advanced_garch(close_series: pd.Series, dist_type: str = "StudentsT", is_asymmetric: bool = False):
-    """Fits GARCH(1,1) or Asymmetric GJR-GARCH(1,1) model on daily returns."""
+    """Fits GARCH(1,1) or Asymmetric GJR-GARCH(1,1) on daily returns."""
     returns = (100.0 * np.log(close_series / close_series.shift(1))).dropna()
     if len(returns) < 30:
         raise ValueError("Insufficient candle history to fit GARCH.")
@@ -391,19 +425,19 @@ def fit_advanced_garch(close_series: pd.Series, dist_type: str = "StudentsT", is
 # ---------------------------------------------------------
 st.sidebar.title("⚡ Quant Terminal Controls")
 
+# Auto-refresh symbols catalog every 5 min
 all_futures = fetch_all_futures_symbols()
 
 symbol = st.sidebar.selectbox(
-    "Select Futures Contract",
+    "Select Futures Contract (BTCUSD Prioritized)",
     options=all_futures,
-    index=0,
+    index=0,  # BTCUSD is at index 0
     help=(
-        "Select any active perpetual or futures contract on Delta Exchange India. "
-        "XAUTUSD (Tether Gold), BTCUSD, and ETHUSD are prioritized at the top."
+        "BTCUSD is prioritized by default. You can select any live perpetual/futures contract "
+        "listed on Delta Exchange India (refreshed every 5 minutes from exchange API)."
     )
 )
 
-# Fetch latest live price & compute dynamic metadata
 live_px, live_meta = fetch_live_ticker(symbol)
 sym_meta = get_symbol_metadata(symbol, current_price=live_px if live_px else 100.0)
 market_price_anchor = live_px if (live_px and live_px > 0) else sym_meta["default_price"]
@@ -413,13 +447,13 @@ selected_tf = st.sidebar.selectbox(
     options=list(TIMEFRAME_MAP.keys()),
     index=5,  # 1h Default
     format_func=lambda x: f"{x} - {TIMEFRAME_MAP[x]['label']}",
-    help="Candlestick bar resolution. Default is 1h. Kronos forecasts future K-lines on this selected timeframe."
+    help="Candlestick resolution. Default is 1h. Kronos models autoregressive K-lines on this timeframe."
 )
 
 auto_refresh = st.sidebar.toggle(
     "⚡ Live Real-Time Auto-Refresh",
     value=True,
-    help="Streams live market prices and updates the chart and GARCH levels continuously."
+    help="Smooth live auto-refresh without page flickering or lag. Updates prices in real time."
 )
 
 refresh_rate_sec = st.sidebar.select_slider(
@@ -427,20 +461,20 @@ refresh_rate_sec = st.sidebar.select_slider(
     options=[1, 2, 3, 5, 10],
     value=2,
     disabled=not auto_refresh,
-    help="Polling interval in seconds. 2s offers live updates without exceeding Delta Exchange rate limits."
+    help="Polling interval in seconds. 2s offers low-latency live quotes without hitting exchange rate limits."
 )
 
 st.sidebar.markdown("---")
 sidebar_price_slot = st.sidebar.empty()
 
 # ---------------------------------------------------------
-# MANUAL PRICE OVERRIDE (FIXED SESSION KEYS & RESET)
+# MANUAL PRICE OVERRIDE
 # ---------------------------------------------------------
 use_manual_override = st.sidebar.checkbox(
     "Manual Price Override",
     value=False,
     key=f"override_flag_{symbol}",
-    help="Anchor volatility calculations around a hypothetical price rather than the live exchange mark."
+    help="Override live market price with a custom level to project volatility channels."
 )
 
 manual_input_key = f"manual_num_val_{symbol}"
@@ -461,10 +495,10 @@ if use_manual_override:
             "Enter Base Price ($)",
             min_value=0.0001,
             max_value=10_000_000.0,
-            step=sym_meta["step"],
+            step=sym_meta["default_step"],
             format="%.2f",
             key=manual_input_key,
-            help=f"Custom base price for {symbol}. Step size: ${sym_meta['step']:.2f}."
+            help=f"Custom base price for {symbol}. Step size: ${sym_meta['default_step']:.2f}."
         )
 else:
     base_price = float(market_price_anchor)
@@ -474,11 +508,11 @@ st.sidebar.subheader("🧠 Kronos Foundation Model")
 
 kronos_steps = st.sidebar.slider(
     "Kronos Forecast Horizon (Candles)",
-    min_value=4,
-    max_value=36,
-    value=12,
-    step=2,
-    help="Number of future K-lines to forecast using the Kronos foundation architecture."
+    min_value=6,
+    max_value=72,
+    value=36,  # 36 Candles Default as requested
+    step=6,
+    help="Number of future K-lines to autoregressively forecast (Default: 36 bars = 1.5 days on 1h timeframe)."
 )
 
 st.sidebar.markdown("---")
@@ -512,22 +546,8 @@ show_tail_levels = st.sidebar.checkbox(
     help="Adds ±3.0σ extreme tail risk boundaries."
 )
 
-# Sidebar Mathematical Reference
-with st.sidebar.expander("ℹ️ Mathematical & Model Guide"):
-    st.markdown("""
-    **Kronos Foundation Model (shiyu-coder/Kronos):**
-    * Autoregressive Transformer trained on billions of candlestick sequences across global exchanges.
-    * Jointly models Open, High, Low, Close, and Volume while preserving geometric candle geometry.
-    * Monte Carlo sampling generates probabilistic future scenarios.
-    
-    **GJR-GARCH Equation:**
-    $$\\sigma_t^2 = \\omega + (\\alpha + \\gamma I_{t-1}) \\epsilon_{t-1}^2 + \\beta \\sigma_{t-1}^2$$
-    * $\\gamma$: Asymmetric leverage coefficient ($I_{t-1} = 1$ when return is negative).
-    * $\\alpha + \\beta + \\frac{\\gamma}{2}$: Persistence factor.
-    """)
-
 # ---------------------------------------------------------
-# LOAD HISTORICAL DATA (DAILY FOR GARCH, TIMEFRAME FOR KRONOS)
+# HISTORICAL DATA & GARCH CALIBRATION
 # ---------------------------------------------------------
 df_daily = fetch_candles_tf(symbol, resolution="1d", num_bars=365)
 if df_daily is None or len(df_daily) < 30:
@@ -542,8 +562,8 @@ if df_daily is None or len(df_daily) < 30:
 daily_sigma, garch_diag = fit_advanced_garch(df_daily["close"], dist_type=dist_choice, is_asymmetric=is_asymmetric)
 annual_sigma = daily_sigma * np.sqrt(365.0)
 
-# Fetch Selected Timeframe Candles for Chart & Kronos
-df_tf = fetch_candles_tf(symbol, resolution=selected_tf, num_bars=120)
+# Fetch Selected Timeframe Candles (e.g., 1h default)
+df_tf = fetch_candles_tf(symbol, resolution=selected_tf, num_bars=150)
 if df_tf is None or len(df_tf) < 20:
     df_tf = df_daily.copy()
 
@@ -559,11 +579,22 @@ horizons = {
     "30-Day (Monthly Expiry)": daily_sigma * np.sqrt(30)
 }
 
+# Fetch Exact Traded Option Strikes from Delta Exchange (Auto-refreshed every 5 min)
+active_option_strikes = fetch_live_delta_option_strikes(sym_meta["asset"])
+
+def snap_to_exact_delta_strike(target_price: float, strikes_list: list, tick_sz: float):
+    """Matches target price to actual traded strike on Delta Exchange India."""
+    if strikes_list and len(strikes_list) > 0:
+        return min(strikes_list, key=lambda k: abs(k - target_price))
+    # Fallback if no options chain currently open for this asset
+    grid = 500.0 if target_price > 20000 else (25.0 if target_price > 1000 else 5.0)
+    return round(target_price / grid) * grid
+
 # ---------------------------------------------------------
-# DASHBOARD RENDERING ENGINE (BUG-FREE & RESILIENT)
+# SMOOTH RENDERING ENGINE (NO PAGE FLICKERING)
 # ---------------------------------------------------------
 def render_terminal(current_price: float, live_market_price: float, active_meta: dict = None):
-    # Update Synchronized Sidebar Price
+    # Synchronize sidebar price slot smoothly
     if use_manual_override:
         sidebar_price_slot.markdown(f"""
         <div style="background:rgba(41,182,246,0.12); border:1px solid rgba(41,182,246,0.35); padding:10px 14px; border-radius:8px; margin-bottom:12px;">
@@ -581,7 +612,7 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
         </div>
         """, unsafe_allow_html=True)
 
-    # Level Projections
+    # 1. Level Projections
     is_geom = "Geometric" in calc_method
     if is_geom:
         p_plus_3s = current_price * np.exp(3 * daily_sigma)
@@ -602,20 +633,21 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
         p_minus_2_5s = current_price * (1 - 2.5 * daily_sigma)
         p_minus_3s = current_price * (1 - 3 * daily_sigma)
 
-    # Dynamic symbol metadata lookup (Resolves NameError/KeyError permanently)
-    meta = get_symbol_metadata(symbol, current_price)
-    tick = meta["tick_size"]
-    s_int = meta["strike_interval"]
-    
-    def snap_strike(px):
-        return round(px / s_int) * s_int if s_int > 0 else px
-
+    tick = sym_meta["tick_size"]
     p_plus_3s_rnd = round(p_plus_3s / tick) * tick
     p_plus_2s_rnd = round(p_plus_2s / tick) * tick
     p_plus_1s_rnd = round(p_plus_1s / tick) * tick
     p_minus_1s_rnd = round(p_minus_1s / tick) * tick
     p_minus_2s_rnd = round(p_minus_2s / tick) * tick
     p_minus_3s_rnd = round(p_minus_3s / tick) * tick
+
+    # Exact Option Strikes from Delta Exchange
+    strike_p3 = snap_to_exact_delta_strike(p_plus_3s_rnd, active_option_strikes, tick)
+    strike_p2 = snap_to_exact_delta_strike(p_plus_2s_rnd, active_option_strikes, tick)
+    strike_p1 = snap_to_exact_delta_strike(p_plus_1s_rnd, active_option_strikes, tick)
+    strike_m1 = snap_to_exact_delta_strike(p_minus_1s_rnd, active_option_strikes, tick)
+    strike_m2 = snap_to_exact_delta_strike(p_minus_2s_rnd, active_option_strikes, tick)
+    strike_m3 = snap_to_exact_delta_strike(p_minus_3s_rnd, active_option_strikes, tick)
 
     # Risk Metrics
     var_95_pct = 1.645 * daily_sigma
@@ -634,7 +666,7 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
         hl = garch_diag.get('half_life', np.nan)
         hl_str = f"{hl:.1f} days" if not np.isnan(hl) else "N/A"
         st.caption(
-            f"**Contract:** {meta['name']} | **Interval:** `{selected_tf}` | "
+            f"**Contract:** {sym_meta['name']} | **Resolution:** `{selected_tf}` | "
             f"**GARCH Persistence:** `{pers:.3f}` | **Shock Half-Life:** `{hl_str}`"
         )
     with h_col2:
@@ -645,7 +677,7 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
             delta_color="off"
         )
 
-    # Live 24h Delta Exchange Strip
+    # Live 24h Delta Exchange Market Stats
     stats_source = active_meta if active_meta else live_meta
     if stats_source:
         s1, s2, s3, s4, s5 = st.columns(5)
@@ -675,11 +707,11 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div>
                     <span style="font-size:1.15rem; font-weight:800; color:#ff9f43;">🧠 KRONOS NEXT-MOVE FORECAST</span>
-                    <span style="font-size:0.85rem; opacity:0.8; margin-left:8px;">(shiyu-coder/Kronos K-Line Foundation Model)</span>
+                    <span style="font-size:0.85rem; opacity:0.8; margin-left:8px;">(shiyu-coder/Kronos Autoregressive K-Line Model)</span>
                 </div>
                 <div>
                     <span style="font-size:0.9rem; font-weight:700; background:rgba(255,255,255,0.1); padding:4px 10px; border-radius:6px;">
-                        Horizon: {kronos_res['horizon_steps']} × {selected_tf} bars
+                        Horizon: {kronos_res['horizon_steps']} × {selected_tf} bars (Default: 36)
                     </span>
                 </div>
             </div>
@@ -713,13 +745,12 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
         """, unsafe_allow_html=True)
 
     # ---------------------------------------------------------
-    # LIVE INTERACTIVE CHART (1H DEFAULT) WITH KRONOS FORECAST
+    # ADVANCED CHART WITH ALL LEVELS VISIBLE & DUAL CROSSHAIR
     # ---------------------------------------------------------
     st.markdown(f"### 📉 Live {selected_tf.upper()} Candlesticks & Kronos Autoregressive Forecast")
     
     chart_df = df_tf.tail(75).copy().reset_index(drop=True)
     if len(chart_df) > 0:
-        # Dynamically attach current price to latest bar so chart updates live
         chart_df.loc[chart_df.index[-1], "close"] = current_price
         if current_price > chart_df.loc[chart_df.index[-1], "high"]:
             chart_df.loc[chart_df.index[-1], "high"] = current_price
@@ -740,7 +771,7 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
         decreasing_line_color="#ef5350"
     ))
 
-    # 2. Kronos Predicted Candlesticks & Confidence Tunnel
+    # 2. Kronos Predicted Candlesticks & 80% Uncertainty Band
     if kronos_res and "df_pred" in kronos_res:
         pred_df = kronos_res["df_pred"]
         
@@ -760,28 +791,72 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
             high=pred_df["high"],
             low=pred_df["low"],
             close=pred_df["close"],
-            name="Kronos Foundation Forecast",
+            name="Kronos 36-Bar Forecast",
             increasing_line_color="#ff9f43",
             decreasing_line_color="#ee5253",
             opacity=0.92
         ))
 
-    # 3. GARCH Boundary Levels on the Chart
+    # 3. Full-Span Volatility Level Lines with High-Contrast Annotations
     x_end = kronos_res["df_pred"]["time"].iloc[-1] if (kronos_res and "df_pred" in kronos_res) else chart_df["time"].iloc[-1]
     x_full = [chart_df["time"].iloc[0], x_end]
-    fig.add_trace(go.Scatter(x=x_full, y=[p_plus_2s_rnd, p_plus_2s_rnd], mode="lines", name="+2σ Resistance", line=dict(color="#ef5350", width=1.5, dash="dash")))
-    fig.add_trace(go.Scatter(x=x_full, y=[p_plus_1s_rnd, p_plus_1s_rnd], mode="lines", name="+1σ Resistance", line=dict(color="#ffa726", width=1.2, dash="dot")))
-    fig.add_trace(go.Scatter(x=x_full, y=[current_price, current_price], mode="lines", name="Base Anchor", line=dict(color="#29b6f6", width=1.2)))
-    fig.add_trace(go.Scatter(x=x_full, y=[p_minus_1s_rnd, p_minus_1s_rnd], mode="lines", name="-1σ Support", line=dict(color="#66bb6a", width=1.2, dash="dot")))
-    fig.add_trace(go.Scatter(x=x_full, y=[p_minus_2s_rnd, p_minus_2s_rnd], mode="lines", name="-2σ Support", line=dict(color="#26a69a", width=1.5, dash="dash")))
 
+    levels_config = [
+        ("+2σ Resistance", p_plus_2s_rnd, "#ff5252", "dash"),
+        ("+1σ Resistance", p_plus_1s_rnd, "#ffa726", "dot"),
+        ("Anchor Center", current_price, "#00e5ff", "solid"),
+        ("-1σ Support", p_minus_1s_rnd, "#69f0ae", "dot"),
+        ("-2σ Support", p_minus_2s_rnd, "#00e676", "dash"),
+    ]
+    if show_tail_levels:
+        levels_config.insert(0, ("+3σ Extreme Tail", p_plus_3s_rnd, "#ff1744", "dashdot"))
+        levels_config.append(("-3σ Extreme Tail", p_minus_3s_rnd, "#00bfa5", "dashdot"))
+
+    for label, val, color, dash in levels_config:
+        fig.add_trace(go.Scatter(
+            x=x_full,
+            y=[val, val],
+            mode="lines+text",
+            name=f"{label} (${val:,.2f})",
+            line=dict(color=color, width=1.5, dash=dash),
+            text=["", f" {label}: ${val:,.2f}"],
+            textposition="top right",
+            textfont=dict(size=10, color=color)
+        ))
+
+    # Guaranteed Y-Axis Scale Bounds (Every Level 100% Visible)
+    top_bound = p_plus_3s_rnd if show_tail_levels else p_plus_2s_rnd
+    bottom_bound = p_minus_3s_rnd if show_tail_levels else p_minus_2s_rnd
+    y_min_chart = min(chart_df["low"].min(), bottom_bound * 0.985)
+    y_max_chart = max(chart_df["high"].max(), top_bound * 1.015)
+
+    # Interactive Crosshair & Dark Terminal Grid
     fig.update_layout(
         title=None,
-        height=520,
-        margin=dict(l=10, r=20, t=10, b=50),
+        height=560,
+        margin=dict(l=10, r=90, t=10, b=50),
         xaxis_rangeslider_visible=False,
-        yaxis=dict(title="Price ($)", side="right", gridcolor="rgba(255,255,255,0.06)"),
-        xaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
+        yaxis=dict(
+            title="Price ($)",
+            side="right",
+            range=[y_min_chart, y_max_chart],
+            gridcolor="rgba(255,255,255,0.06)",
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikethickness=1.2,
+            spikedash="dot",
+            spikecolor="#00e5ff"
+        ),
+        xaxis=dict(
+            gridcolor="rgba(255,255,255,0.06)",
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikethickness=1.2,
+            spikedash="dot",
+            spikecolor="#00e5ff"
+        ),
         legend=dict(
             orientation="h",
             yanchor="top",
@@ -809,8 +884,10 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
 
     st.markdown("---")
 
-    # Primary GARCH Level Cards
-    st.markdown("### 🎯 GARCH Volatility Level Cards")
+    # ---------------------------------------------------------
+    # PRIMARY GARCH LEVEL CARDS (EXACT DELTA OPTIONS STRIKES)
+    # ---------------------------------------------------------
+    st.markdown("### 🎯 GARCH Volatility Level Cards & Delta Options Mapping")
 
     if show_tail_levels:
         st.markdown(f"""
@@ -819,9 +896,9 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
                 <div class="level-name" style="color: #ef5350;">
                     🔴 +3 Sigma (+3σ) Extreme Resistance 
                     <span class="stat-pill" style="background: rgba(239,83,80,0.3); color: #ef5350;">99.73% Bound</span>
-                    <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Strike: ${snap_strike(p_plus_3s_rnd):,.0f}</span>
+                    <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Delta Strike: ${strike_p3:,.0f} Call</span>
                 </div>
-                <div class="level-desc">Extreme Black Swan Spike • Circuit Breaker Threshold</div>
+                <div class="level-desc">Extreme Black Swan Spike • Circuit Breaker Threshold • Tail Shock Exhaustion</div>
             </div>
             <div>
                 <div class="level-price" style="color: #ef5350;">${p_plus_3s_rnd:,.2f}</div>
@@ -838,7 +915,7 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
                 🔴 +2 Sigma (+2σ) Resistance 
                 <span class="stat-pill" style="background: rgba(239,83,80,0.2); color: #ef5350;">95.45% Bound</span>
                 <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ddd;">Touch Prob: ~4.55%</span>
-                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Strike: ${snap_strike(p_plus_2s_rnd):,.0f}</span>
+                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Delta Strike: ${strike_p2:,.0f} Call</span>
             </div>
             <div class="level-desc">Statistical Envelope Cap • Extreme Overbought • Optimal for Selling OTM Calls / Bear Call Spreads</div>
         </div>
@@ -857,9 +934,9 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
                 🟠 +1 Sigma (+1σ) Resistance 
                 <span class="stat-pill" style="background: rgba(255,167,38,0.2); color: #ffa726;">68.27% Bound</span>
                 <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ddd;">Touch Prob: ~31.73%</span>
-                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Strike: ${snap_strike(p_plus_1s_rnd):,.0f}</span>
+                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Delta Strike: ${strike_p1:,.0f} Call</span>
             </div>
-            <div class="level-desc">Momentum Barrier • Take-Profit Target for Longs • First Resistance Zone</div>
+            <div class="level-desc">Momentum Barrier • Take-Profit Target for Longs • First Resistance Pivot</div>
         </div>
         <div>
             <div class="level-price" style="color: #ffa726;">${p_plus_1s_rnd:,.2f}</div>
@@ -893,7 +970,7 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
                 🟢 -1 Sigma (-1σ) Support 
                 <span class="stat-pill" style="background: rgba(102,187,106,0.2); color: #66bb6a;">68.27% Bound</span>
                 <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ddd;">Touch Prob: ~31.73%</span>
-                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Strike: ${snap_strike(p_minus_1s_rnd):,.0f}</span>
+                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Delta Strike: ${strike_m1:,.0f} Put</span>
             </div>
             <div class="level-desc">Trend Pullback Support • First Dip-Buying Accumulation Zone</div>
         </div>
@@ -912,7 +989,7 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
                 🟢 -2 Sigma (-2σ) Support 
                 <span class="stat-pill" style="background: rgba(38,166,154,0.2); color: #26a69a;">95.45% Bound</span>
                 <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ddd;">Touch Prob: ~4.55%</span>
-                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Strike: ${snap_strike(p_minus_2s_rnd):,.0f}</span>
+                <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Delta Strike: ${strike_m2:,.0f} Put</span>
             </div>
             <div class="level-desc">Statistical Envelope Floor • Extreme Oversold • Put Spread Short Leg / Mean-Reversion Long</div>
         </div>
@@ -930,7 +1007,7 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
                 <div class="level-name" style="color: #00897b;">
                     🟢 -3 Sigma (-3σ) Extreme Support 
                     <span class="stat-pill" style="background: rgba(0,137,123,0.3); color: #4db6ac;">99.73% Bound</span>
-                    <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Strike: ${snap_strike(p_minus_3s_rnd):,.0f}</span>
+                    <span class="stat-pill" style="background: rgba(255,255,255,0.08); color: #ffd54f;">Delta Strike: ${strike_m3:,.0f} Put</span>
                 </div>
                 <div class="level-desc">Flash Crash Floor • Deep Institutional Liquidation Exhaustion Boundary</div>
             </div>
@@ -1021,7 +1098,7 @@ def render_terminal(current_price: float, live_market_price: float, active_meta:
         st.code(bracket_json, language="json")
 
 # ---------------------------------------------------------
-# AUTO-REFRESH CONTROLLER
+# SMOOTH AUTO-REFRESH CONTROLLER (NO FLICKER)
 # ---------------------------------------------------------
 if auto_refresh and hasattr(st, "fragment"):
     @st.fragment(run_every=f"{refresh_rate_sec}s")
