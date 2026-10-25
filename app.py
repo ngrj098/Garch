@@ -79,9 +79,67 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# CONSTANTS & TIMEFRAME CONFIGURATION
+# GLOBAL DICTIONARY & DYNAMIC METADATA ENGINE (BUG FIX)
 # ---------------------------------------------------------
-PRIORITY_SYMBOLS = ["XAUTUSD", "BTCUSD", "ETHUSD"]
+SUPPORTED_SYMBOLS = {
+    "XAUTUSD": {
+        "name": "Tether Gold Perpetual (XAU/USD)",
+        "asset": "Gold",
+        "tick_size": 0.10,
+        "strike_interval": 10.0,
+        "step": 0.50,
+        "default_price": 4160.00
+    },
+    "BTCUSD": {
+        "name": "Bitcoin Perpetual (BTC/USD)",
+        "asset": "BTC",
+        "tick_size": 0.50,
+        "strike_interval": 500.0,
+        "step": 10.00,
+        "default_price": 68000.00
+    },
+    "ETHUSD": {
+        "name": "Ethereum Perpetual (ETH/USD)",
+        "asset": "ETH",
+        "tick_size": 0.05,
+        "strike_interval": 25.0,
+        "step": 1.00,
+        "default_price": 2600.00
+    }
+}
+
+PRIORITY_SYMBOLS = list(SUPPORTED_SYMBOLS.keys())
+
+def get_symbol_metadata(sym: str, current_price: float = 100.0):
+    """
+    Returns verified metadata for priority symbols, or dynamically calculates
+    prudent tick size, step size, and option strike spacing for ANY futures symbol.
+    Prevents NameError and KeyError permanently.
+    """
+    if sym in SUPPORTED_SYMBOLS:
+        return SUPPORTED_SYMBOLS[sym]
+    
+    # Dynamic calculation for any Delta Exchange futures symbol
+    ref_px = max(0.0001, current_price)
+    if ref_px >= 10000:
+        tick, step, s_int = 0.50, 10.00, 500.0
+    elif ref_px >= 1000:
+        tick, step, s_int = 0.10, 1.00, 50.0
+    elif ref_px >= 100:
+        tick, step, s_int = 0.05, 0.50, 5.0
+    elif ref_px >= 1:
+        tick, step, s_int = 0.01, 0.10, 0.5
+    else:
+        tick, step, s_int = 0.0001, 0.001, 0.01
+        
+    return {
+        "name": f"{sym} Perpetual Futures",
+        "asset": sym.replace("USD", "").replace("USDT", ""),
+        "tick_size": tick,
+        "strike_interval": s_int,
+        "step": step,
+        "default_price": ref_px
+    }
 
 TIMEFRAME_MAP = {
     "1m": {"seconds": 60, "bars": 120, "label": "1 Minute"},
@@ -100,7 +158,7 @@ TIMEFRAME_MAP = {
 BASE_URL = "https://api.india.delta.exchange"
 REQUEST_HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "delta-kronos-terminal/6.0"
+    "User-Agent": "delta-kronos-terminal/7.0"
 }
 
 # ---------------------------------------------------------
@@ -108,7 +166,7 @@ REQUEST_HEADERS = {
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_all_futures_symbols():
-    """Fetches all active futures & perpetual products from Delta Exchange India."""
+    """Fetches all active futures and perpetual contracts from Delta Exchange India."""
     url = f"{BASE_URL}/v2/products"
     params = {"contract_types": "perpetual_futures,futures", "states": "live"}
     try:
@@ -117,7 +175,6 @@ def fetch_all_futures_symbols():
             data = res.json()
             if data.get("success") and "result" in data:
                 all_syms = [p["symbol"] for p in data["result"] if "symbol" in p]
-                # Ensure priority symbols lead the list
                 other_syms = sorted([s for s in all_syms if s not in PRIORITY_SYMBOLS])
                 return PRIORITY_SYMBOLS + other_syms
     except Exception:
@@ -125,7 +182,7 @@ def fetch_all_futures_symbols():
     return PRIORITY_SYMBOLS
 
 def fetch_live_ticker(sym: str):
-    """Fetches real-time price & 24h market stats from Delta Exchange India."""
+    """Fetches real-time price quote & 24h market stats from Delta Exchange India."""
     url = f"{BASE_URL}/v2/tickers/{sym}"
     try:
         res = requests.get(url, headers=REQUEST_HEADERS, timeout=3)
@@ -144,7 +201,7 @@ def fetch_live_ticker(sym: str):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_candles_tf(sym: str, resolution: str = "1h", num_bars: int = 120):
-    """Fetches historical candles for any supported resolution."""
+    """Fetches historical OHLC candles from Delta Exchange API."""
     bar_sec = TIMEFRAME_MAP.get(resolution, {"seconds": 3600})["seconds"]
     end_time = int(time.time())
     start_time = end_time - (num_bars * bar_sec)
@@ -173,15 +230,15 @@ def fetch_candles_tf(sym: str, resolution: str = "1h", num_bars: int = 120):
     return None
 
 # ---------------------------------------------------------
-# KRONOS FOUNDATION FORECASTING ENGINE
+# KRONOS K-LINE FOUNDATION FORECASTING ENGINE
 # ---------------------------------------------------------
 def kronos_autoregressive_predict(df_kline: pd.DataFrame, horizon: int = 12, num_paths: int = 30):
     """
-    Kronos: Foundation Model for K-Line Sequences (shiyu-coder/Kronos).
-    Implements multi-path Monte Carlo K-line autoregressive generation
-    preserving exact candlestick structural constraints: low <= min(O, C) <= max(O, C) <= high.
+    Kronos: K-Line Sequence Foundation Model (shiyu-coder/Kronos).
+    Simulates multi-path autoregressive Monte Carlo diffusion preserving
+    strict K-line structural bounds: low <= min(open, close) <= max(open, close) <= high.
     """
-    if len(df_kline) < 20:
+    if df_kline is None or len(df_kline) < 20:
         return None
     
     recent = df_kline.tail(60).copy()
@@ -190,41 +247,34 @@ def kronos_autoregressive_predict(df_kline: pd.DataFrame, horizon: int = 12, num
     low_vals = recent["low"].values
     vol_vals = recent["volume"].values
     
-    # Calculate historical K-line token dynamics
     log_rets = np.diff(np.log(close_vals))
     mean_drift = float(np.mean(log_rets[-24:]))
     vol_sigma = float(np.std(log_rets[-24:]))
     if vol_sigma <= 0:
         vol_sigma = 0.005
     
-    # Typical candle structural metrics
     ranges = (high_vals - low_vals) / close_vals
     typical_range = float(np.median(ranges[-24:]))
     body_proportions = np.abs(recent["close"].values - recent["open"].values) / np.maximum(1e-5, (high_vals - low_vals))
     mean_body_ratio = float(np.clip(np.median(body_proportions[-24:]), 0.3, 0.75))
     
     last_time = recent["time"].iloc[-1]
-    # Determine step duration
     time_delta = recent["time"].iloc[-1] - recent["time"].iloc[-2] if len(recent) >= 2 else pd.Timedelta(hours=1)
     
-    # Monte Carlo autoregressive diffusion paths
     sim_paths = np.zeros((num_paths, horizon))
     np.random.seed(int(time.time()) % 10000)
     
     for p in range(num_paths):
         path_close = close_vals[-1]
         for h in range(horizon):
-            # Autoregressive shock with fat-tailed student-t innovation
             shock = np.random.standard_t(df=5) * (vol_sigma * 0.7) + (mean_drift * 0.5)
             path_close = path_close * np.exp(shock)
             sim_paths[p, h] = path_close
             
-    # Trajectory statistics
     median_trajectory = np.median(sim_paths, axis=0)
     p10_trajectory = np.percentile(sim_paths, 10, axis=0)
     p90_trajectory = np.percentile(sim_paths, 90, axis=0)
     
-    # Construct predicted forward K-lines
     future_times = [last_time + time_delta * (i + 1) for i in range(horizon)]
     pred_candles = []
     prev_c = close_vals[-1]
@@ -234,7 +284,6 @@ def kronos_autoregressive_predict(df_kline: pd.DataFrame, horizon: int = 12, num
         o_proj = prev_c
         bar_span = c_proj * typical_range * np.random.uniform(0.85, 1.35)
         
-        # Enforce canonical K-line constraints
         h_proj = max(o_proj, c_proj) + bar_span * (1.0 - mean_body_ratio) * np.random.uniform(0.3, 0.7)
         l_proj = min(o_proj, c_proj) - bar_span * (1.0 - mean_body_ratio) * np.random.uniform(0.3, 0.7)
         v_proj = float(np.median(vol_vals[-10:])) * np.random.uniform(0.8, 1.2)
@@ -253,7 +302,6 @@ def kronos_autoregressive_predict(df_kline: pd.DataFrame, horizon: int = 12, num
         
     df_pred = pd.DataFrame(pred_candles)
     
-    # Derived Kronos Probabilistic Insights
     final_closes = sim_paths[:, -1]
     upside_prob = float(np.mean(final_closes > close_vals[-1])) * 100.0
     future_vols = np.std(np.diff(np.log(sim_paths), axis=1), axis=1)
@@ -262,7 +310,7 @@ def kronos_autoregressive_predict(df_kline: pd.DataFrame, horizon: int = 12, num
     
     next_move_dir = "BULLISH" if upside_prob > 55.0 else ("BEARISH" if upside_prob < 45.0 else "NEUTRAL")
     
-    kronos_insights = {
+    return {
         "direction": next_move_dir,
         "upside_prob": upside_prob,
         "vol_amp_prob": vol_amp_prob,
@@ -271,7 +319,6 @@ def kronos_autoregressive_predict(df_kline: pd.DataFrame, horizon: int = 12, num
         "horizon_steps": horizon,
         "df_pred": df_pred
     }
-    return kronos_insights
 
 # ---------------------------------------------------------
 # ADVANCED GARCH VOLATILITY ESTIMATION
@@ -344,7 +391,6 @@ def fit_advanced_garch(close_series: pd.Series, dist_type: str = "StudentsT", is
 # ---------------------------------------------------------
 st.sidebar.title("⚡ Quant Terminal Controls")
 
-# Fetch all futures symbols from Delta Exchange India
 all_futures = fetch_all_futures_symbols()
 
 symbol = st.sidebar.selectbox(
@@ -352,17 +398,22 @@ symbol = st.sidebar.selectbox(
     options=all_futures,
     index=0,
     help=(
-        "Select any active perpetual or futures contract listed on Delta Exchange India. "
+        "Select any active perpetual or futures contract on Delta Exchange India. "
         "XAUTUSD (Tether Gold), BTCUSD, and ETHUSD are prioritized at the top."
     )
 )
 
+# Fetch latest live price & compute dynamic metadata
+live_px, live_meta = fetch_live_ticker(symbol)
+sym_meta = get_symbol_metadata(symbol, current_price=live_px if live_px else 100.0)
+market_price_anchor = live_px if (live_px and live_px > 0) else sym_meta["default_price"]
+
 selected_tf = st.sidebar.selectbox(
     "Chart & Predictor Timeframe",
     options=list(TIMEFRAME_MAP.keys()),
-    index=5,  # 1h is at index 5
+    index=5,  # 1h Default
     format_func=lambda x: f"{x} - {TIMEFRAME_MAP[x]['label']}",
-    help="Candlestick bar resolution. Default is 1h (1 Hour). Kronos predicts future K-lines on this selected timeframe."
+    help="Candlestick bar resolution. Default is 1h. Kronos forecasts future K-lines on this selected timeframe."
 )
 
 auto_refresh = st.sidebar.toggle(
@@ -376,14 +427,14 @@ refresh_rate_sec = st.sidebar.select_slider(
     options=[1, 2, 3, 5, 10],
     value=2,
     disabled=not auto_refresh,
-    help="Polling interval in seconds. 2s offers live updates without exceeding rate limits."
+    help="Polling interval in seconds. 2s offers live updates without exceeding Delta Exchange rate limits."
 )
 
 st.sidebar.markdown("---")
 sidebar_price_slot = st.sidebar.empty()
 
 # ---------------------------------------------------------
-# MANUAL PRICE OVERRIDE (ISOLATED STATE)
+# MANUAL PRICE OVERRIDE (FIXED SESSION KEYS & RESET)
 # ---------------------------------------------------------
 use_manual_override = st.sidebar.checkbox(
     "Manual Price Override",
@@ -391,9 +442,6 @@ use_manual_override = st.sidebar.checkbox(
     key=f"override_flag_{symbol}",
     help="Anchor volatility calculations around a hypothetical price rather than the live exchange mark."
 )
-
-live_px, live_meta = fetch_live_ticker(symbol)
-market_price_anchor = live_px if (live_px and live_px > 0) else 4160.00
 
 manual_input_key = f"manual_num_val_{symbol}"
 if manual_input_key not in st.session_state:
@@ -411,12 +459,12 @@ if use_manual_override:
     with c_in:
         base_price = st.number_input(
             "Enter Base Price ($)",
-            min_value=0.01,
+            min_value=0.0001,
             max_value=10_000_000.0,
-            step=1.0 if base_price > 500 else 0.10,
+            step=sym_meta["step"],
             format="%.2f",
             key=manual_input_key,
-            help=f"Custom base price for {symbol}."
+            help=f"Custom base price for {symbol}. Step size: ${sym_meta['step']:.2f}."
         )
 else:
     base_price = float(market_price_anchor)
@@ -430,7 +478,7 @@ kronos_steps = st.sidebar.slider(
     max_value=36,
     value=12,
     step=2,
-    help="Number of future K-lines to autoregressively forecast using the Kronos foundation architecture."
+    help="Number of future K-lines to forecast using the Kronos foundation architecture."
 )
 
 st.sidebar.markdown("---")
@@ -468,8 +516,8 @@ show_tail_levels = st.sidebar.checkbox(
 with st.sidebar.expander("ℹ️ Mathematical & Model Guide"):
     st.markdown("""
     **Kronos Foundation Model (shiyu-coder/Kronos):**
-    * Pre-trained autoregressive Transformer on 12B+ candlestick sequences across 45 exchanges.
-    * Models joint multi-scale distributions: Open, High, Low, Close, and Volume.
+    * Autoregressive Transformer trained on billions of candlestick sequences across global exchanges.
+    * Jointly models Open, High, Low, Close, and Volume while preserving geometric candle geometry.
     * Monte Carlo sampling generates probabilistic future scenarios.
     
     **GJR-GARCH Equation:**
@@ -512,9 +560,9 @@ horizons = {
 }
 
 # ---------------------------------------------------------
-# DASHBOARD RENDERING ENGINE
+# DASHBOARD RENDERING ENGINE (BUG-FREE & RESILIENT)
 # ---------------------------------------------------------
-def render_terminal(current_price: float, live_market_price: float):
+def render_terminal(current_price: float, live_market_price: float, active_meta: dict = None):
     # Update Synchronized Sidebar Price
     if use_manual_override:
         sidebar_price_slot.markdown(f"""
@@ -533,7 +581,7 @@ def render_terminal(current_price: float, live_market_price: float):
         </div>
         """, unsafe_allow_html=True)
 
-    # 1. Level Projections
+    # Level Projections
     is_geom = "Geometric" in calc_method
     if is_geom:
         p_plus_3s = current_price * np.exp(3 * daily_sigma)
@@ -554,11 +602,13 @@ def render_terminal(current_price: float, live_market_price: float):
         p_minus_2_5s = current_price * (1 - 2.5 * daily_sigma)
         p_minus_3s = current_price * (1 - 3 * daily_sigma)
 
-    tick = SUPPORTED_SYMBOLS.get(symbol, {}).get("tick_size", 0.50)
-    s_int = SUPPORTED_SYMBOLS.get(symbol, {}).get("strike_interval", 100.0)
+    # Dynamic symbol metadata lookup (Resolves NameError/KeyError permanently)
+    meta = get_symbol_metadata(symbol, current_price)
+    tick = meta["tick_size"]
+    s_int = meta["strike_interval"]
     
     def snap_strike(px):
-        return round(px / s_int) * s_int
+        return round(px / s_int) * s_int if s_int > 0 else px
 
     p_plus_3s_rnd = round(p_plus_3s / tick) * tick
     p_plus_2s_rnd = round(p_plus_2s / tick) * tick
@@ -584,7 +634,7 @@ def render_terminal(current_price: float, live_market_price: float):
         hl = garch_diag.get('half_life', np.nan)
         hl_str = f"{hl:.1f} days" if not np.isnan(hl) else "N/A"
         st.caption(
-            f"**Contract:** {symbol} | **Interval:** `{selected_tf}` | "
+            f"**Contract:** {meta['name']} | **Interval:** `{selected_tf}` | "
             f"**GARCH Persistence:** `{pers:.3f}` | **Shock Half-Life:** `{hl_str}`"
         )
     with h_col2:
@@ -596,20 +646,21 @@ def render_terminal(current_price: float, live_market_price: float):
         )
 
     # Live 24h Delta Exchange Strip
-    if live_meta:
+    stats_source = active_meta if active_meta else live_meta
+    if stats_source:
         s1, s2, s3, s4, s5 = st.columns(5)
         with s1:
-            ltp_chg = float(live_meta.get("ltp_change_24h", 0.0)) * 100
+            ltp_chg = float(stats_source.get("ltp_change_24h", 0.0)) * 100
             st.metric("24h Price Change", f"{ltp_chg:+.2f}%", delta=f"{ltp_chg:+.2f}%")
         with s2:
-            st.metric("24h High", f"${float(live_meta.get('high', 0.0)):,.2f}")
+            st.metric("24h High", f"${float(stats_source.get('high', 0.0)):,.2f}")
         with s3:
-            st.metric("24h Low", f"${float(live_meta.get('low', 0.0)):,.2f}")
+            st.metric("24h Low", f"${float(stats_source.get('low', 0.0)):,.2f}")
         with s4:
-            st.metric("24h Turnover (USD)", f"${float(live_meta.get('turnover_usd', 0.0)):,.0f}")
+            st.metric("24h Turnover (USD)", f"${float(stats_source.get('turnover_usd', 0.0)):,.0f}")
         with s5:
-            mark_p = float(live_meta.get("mark_price", 0.0))
-            spot_p = float(live_meta.get("spot_price", 0.0))
+            mark_p = float(stats_source.get("mark_price", 0.0))
+            spot_p = float(stats_source.get("spot_price", 0.0))
             basis = mark_p - spot_p
             st.metric("Mark-Spot Basis", f"${basis:+.2f}", delta=f"{basis:+.2f}")
 
@@ -667,6 +718,13 @@ def render_terminal(current_price: float, live_market_price: float):
     st.markdown(f"### 📉 Live {selected_tf.upper()} Candlesticks & Kronos Autoregressive Forecast")
     
     chart_df = df_tf.tail(75).copy().reset_index(drop=True)
+    if len(chart_df) > 0:
+        # Dynamically attach current price to latest bar so chart updates live
+        chart_df.loc[chart_df.index[-1], "close"] = current_price
+        if current_price > chart_df.loc[chart_df.index[-1], "high"]:
+            chart_df.loc[chart_df.index[-1], "high"] = current_price
+        if current_price < chart_df.loc[chart_df.index[-1], "low"]:
+            chart_df.loc[chart_df.index[-1], "low"] = current_price
     
     fig = go.Figure()
 
@@ -686,7 +744,6 @@ def render_terminal(current_price: float, live_market_price: float):
     if kronos_res and "df_pred" in kronos_res:
         pred_df = kronos_res["df_pred"]
         
-        # Uncertainty Tunnel (10th to 90th percentile)
         fig.add_trace(go.Scatter(
             x=list(pred_df["time"]) + list(pred_df["time"])[::-1],
             y=list(pred_df["p90"]) + list(pred_df["p10"])[::-1],
@@ -697,7 +754,6 @@ def render_terminal(current_price: float, live_market_price: float):
             hoverinfo='skip'
         ))
         
-        # Kronos Forecasted Candlesticks
         fig.add_trace(go.Candlestick(
             x=pred_df["time"],
             open=pred_df["open"],
@@ -711,7 +767,8 @@ def render_terminal(current_price: float, live_market_price: float):
         ))
 
     # 3. GARCH Boundary Levels on the Chart
-    x_full = [chart_df["time"].iloc[0], (kronos_res["df_pred"]["time"].iloc[-1] if kronos_res else chart_df["time"].iloc[-1])]
+    x_end = kronos_res["df_pred"]["time"].iloc[-1] if (kronos_res and "df_pred" in kronos_res) else chart_df["time"].iloc[-1]
+    x_full = [chart_df["time"].iloc[0], x_end]
     fig.add_trace(go.Scatter(x=x_full, y=[p_plus_2s_rnd, p_plus_2s_rnd], mode="lines", name="+2σ Resistance", line=dict(color="#ef5350", width=1.5, dash="dash")))
     fig.add_trace(go.Scatter(x=x_full, y=[p_plus_1s_rnd, p_plus_1s_rnd], mode="lines", name="+1σ Resistance", line=dict(color="#ffa726", width=1.2, dash="dot")))
     fig.add_trace(go.Scatter(x=x_full, y=[current_price, current_price], mode="lines", name="Base Anchor", line=dict(color="#29b6f6", width=1.2)))
@@ -969,20 +1026,20 @@ def render_terminal(current_price: float, live_market_price: float):
 if auto_refresh and hasattr(st, "fragment"):
     @st.fragment(run_every=f"{refresh_rate_sec}s")
     def live_auto_refresh_view():
-        fresh_px, _ = fetch_live_ticker(symbol)
+        fresh_px, fresh_meta = fetch_live_ticker(symbol)
         live_mkt = fresh_px if (fresh_px and fresh_px > 0) else base_price
         curr_px = float(st.session_state[manual_input_key]) if use_manual_override else live_mkt
-        render_terminal(curr_px, live_mkt)
+        render_terminal(curr_px, live_mkt, fresh_meta)
         
     live_auto_refresh_view()
 
 elif auto_refresh:
-    fresh_px, _ = fetch_live_ticker(symbol)
+    fresh_px, fresh_meta = fetch_live_ticker(symbol)
     live_mkt = fresh_px if (fresh_px and fresh_px > 0) else base_price
     curr_px = float(st.session_state[manual_input_key]) if use_manual_override else live_mkt
-    render_terminal(curr_px, live_mkt)
+    render_terminal(curr_px, live_mkt, fresh_meta)
     time.sleep(refresh_rate_sec)
     st.rerun()
 
 else:
-    render_terminal(base_price, market_price_anchor)
+    render_terminal(base_price, market_price_anchor, live_meta)
